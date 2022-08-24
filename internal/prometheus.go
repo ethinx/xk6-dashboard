@@ -24,217 +24,26 @@ package internal
 
 import (
 	"net/http"
-	"strings"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 type PrometheusAdapter struct {
-	Subsystem string
-	Namespace string
-	logger    logrus.FieldLogger
-	metrics   map[string]interface{}
-	registry  *prometheus.Registry
+	// metrics   map[string]interface{}
+	Subsystem      string
+	Namespace      string
+	logger         logrus.FieldLogger
+	metrics        sync.Map
+	registry       *prometheus.Registry
+	lock           sync.RWMutex
+	builtinMetrics builtinMetrics
 }
 
-func NewPrometheusAdapter(registry *prometheus.Registry, logger logrus.FieldLogger, ns, sub string) *PrometheusAdapter {
-	return &PrometheusAdapter{
-		Subsystem: sub,
-		Namespace: ns,
-		logger:    logger,
-		registry:  registry,
-		metrics:   make(map[string]interface{}),
-	}
-}
-
-func (a *PrometheusAdapter) AddMetricSamples(samples []stats.SampleContainer) {
-	for i := range samples {
-		all := samples[i].GetSamples()
-		for j := range all {
-			a.handleSample(&all[j])
-		}
-	}
-}
-
-func (a *PrometheusAdapter) Handler() http.Handler {
-	return promhttp.HandlerFor(a.registry, promhttp.HandlerOpts{}) // nolint:exhaustivestruct
-}
-
-func (a *PrometheusAdapter) handleSample(sample *stats.Sample) {
-	var handler func(*stats.Sample)
-
-	switch sample.Metric.Type {
-	case stats.Counter:
-		handler = a.handleCounter
-	case stats.Gauge:
-		handler = a.handleGauge
-	case stats.Rate:
-		handler = a.handleRate
-	case stats.Trend:
-		handler = a.handleTrend
-	default:
-		a.logger.Warnf("Unknown metric type: %v", sample.Metric.Type)
-
-		return
-	}
-
-	handler(sample)
-}
-
-func (a *PrometheusAdapter) handleCounter(sample *stats.Sample) {
-	if counter := a.getCounter(sample.Metric.Name, "k6 counter"); counter != nil {
-		counter.Add(sample.Value)
-	}
-}
-
-func (a *PrometheusAdapter) handleGauge(sample *stats.Sample) {
-	if gauge := a.getGauge(sample.Metric.Name, "k6 gauge"); gauge != nil {
-		gauge.Set(sample.Value)
-	}
-}
-
-func (a *PrometheusAdapter) handleRate(sample *stats.Sample) {
-	if histogram := a.getHistogram(sample.Metric.Name, "k6 rate", []float64{0}); histogram != nil {
-		histogram.Observe(sample.Value)
-	}
-}
-
-func (a *PrometheusAdapter) handleTrend(sample *stats.Sample) {
-	if summary := a.getSummary(sample.Metric.Name, "k6 trend"); summary != nil {
-		summary.Observe(sample.Value)
-	}
-
-	if gauge := a.getGauge(sample.Metric.Name+"_current", "k6 trend (current)"); gauge != nil {
-		gauge.Set(sample.Value)
-	}
-}
-
-func (a *PrometheusAdapter) getCounter(name string, helpSuffix string) (counter prometheus.Counter) {
-	if col, ok := a.metrics[name]; ok {
-		if c, tok := col.(prometheus.Counter); tok {
-			counter = c
-		}
-	}
-
-	if counter == nil {
-		counter = prometheus.NewCounter(prometheus.CounterOpts{ // nolint:exhaustivestruct
-			Namespace: a.Namespace,
-			Subsystem: a.Subsystem,
-			Name:      name,
-			Help:      helpFor(name, helpSuffix),
-		})
-
-		if err := a.registry.Register(counter); err != nil {
-			a.logger.Error(err)
-
-			return nil
-		}
-
-		a.metrics[name] = counter
-	}
-
-	return counter
-}
-
-func (a *PrometheusAdapter) getGauge(name string, helpSuffix string) (gauge prometheus.Gauge) {
-	if gau, ok := a.metrics[name]; ok {
-		if g, tok := gau.(prometheus.Gauge); tok {
-			gauge = g
-		}
-	}
-
-	if gauge == nil {
-		gauge = prometheus.NewGauge(prometheus.GaugeOpts{ // nolint:exhaustivestruct
-			Namespace: a.Namespace,
-			Subsystem: a.Subsystem,
-			Name:      name,
-			Help:      helpFor(name, helpSuffix),
-		})
-
-		if err := a.registry.Register(gauge); err != nil {
-			a.logger.Error(err)
-
-			return nil
-		}
-
-		a.metrics[name] = gauge
-	}
-
-	return gauge
-}
-
-func (a *PrometheusAdapter) getSummary(name string, helpSuffix string) (summary prometheus.Summary) {
-	if sum, ok := a.metrics[name]; ok {
-		if s, tok := sum.(prometheus.Summary); tok {
-			summary = s
-		}
-	}
-
-	if summary == nil {
-		summary = prometheus.NewSummary(prometheus.SummaryOpts{ // nolint:exhaustivestruct
-			Namespace:  a.Namespace,
-			Subsystem:  a.Subsystem,
-			Name:       name,
-			Help:       helpFor(name, helpSuffix),
-			Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.95: 0.001, 1: 0}, // nolint:gomnd
-		})
-
-		if err := a.registry.Register(summary); err != nil {
-			a.logger.Error(err)
-
-			return nil
-		}
-
-		a.metrics[name] = summary
-	}
-
-	return summary
-}
-
-func (a *PrometheusAdapter) getHistogram(name string, helpSuffix string, buckets []float64) (histogram prometheus.Histogram) {
-	if his, ok := a.metrics[name]; ok {
-		if h, tok := his.(prometheus.Histogram); tok {
-			histogram = h
-		}
-	}
-
-	if histogram == nil {
-		histogram = prometheus.NewHistogram(prometheus.HistogramOpts{ // nolint:exhaustivestruct
-			Namespace: a.Namespace,
-			Subsystem: a.Subsystem,
-			Name:      name,
-			Help:      helpFor(name, helpSuffix),
-			Buckets:   buckets,
-		})
-
-		if err := a.registry.Register(histogram); err != nil {
-			a.logger.Error(err)
-
-			return nil
-		}
-
-		a.metrics[name] = histogram
-	}
-
-	return histogram
-}
-
-func helpFor(name string, helpSuffix string) string {
-	if h, ok := builtinMetrics[name]; ok {
-		return h
-	}
-
-	if h, ok := builtinMetrics[strings.TrimSuffix(name, "_current")]; ok {
-		return h + " (current)"
-	}
-
-	return name + " " + helpSuffix
-}
-
-var builtinMetrics = map[string]string{
+var builtinMetricsMap = map[string]string{
 	"vus":                "Current number of active virtual users",
 	"vus_max":            "Max possible number of virtual users",
 	"iterations":         "The aggregate number of times the VUs in the test have executed",
@@ -253,4 +62,280 @@ var builtinMetrics = map[string]string{
 	"http_req_receiving":       "Time spent receiving response data",
 	"http_req_duration":        "Total time for the request",
 	"http_req_failed":          "The rate of failed requests",
+}
+
+type builtinMetrics struct {
+	VUS                          prometheus.Gauge
+	VUSMax                       prometheus.Gauge
+	HTTPReqBlockedCurrent        prometheus.Gauge
+	HTTPReqConnectingCurrent     prometheus.Gauge
+	HTTPReqDurationCurrent       prometheus.Gauge
+	HTTPReqFailedCurrent         prometheus.Gauge
+	HTTPReqReceivingCurrent      prometheus.Gauge
+	HTTPReqSendingCurrent        prometheus.Gauge
+	HTTPReqTLSHandshakingCurrent prometheus.Gauge
+	HTTPReqWaitingCurrent        prometheus.Gauge
+	IterationDurationCurrent     prometheus.Gauge
+	DataReceived                 prometheus.Counter
+	DataSent                     prometheus.Counter
+	HTTPReqs                     prometheus.Counter
+	Iterations                   prometheus.Counter
+	DroppedIterations            prometheus.Counter
+	HTTPReqBlocked               prometheus.Summary
+	HTTPReqConnecting            prometheus.Summary
+	HTTPReqDuration              prometheus.Summary
+	HTTPReqReceiving             prometheus.Summary
+	HTTPReqSending               prometheus.Summary
+	HTTPReqTLSHandshaking        prometheus.Summary
+	HTTPReqWaiting               prometheus.Summary
+	IterationDuration            prometheus.Summary
+	Checks                       prometheus.Histogram
+	HTTPReqFailed                prometheus.Histogram
+}
+
+type Counter struct {
+	Counter prometheus.Counter
+	Help    string
+}
+
+func NewCounter(registry *prometheus.Registry, namespace, subsystem, name, help string) prometheus.Counter {
+	metric := prometheus.NewCounter(prometheus.CounterOpts{ // nolint:exhaustivestruct
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      name,
+		Help:      help,
+	})
+
+	return metric
+}
+
+type Gauge struct {
+	Gauge prometheus.Gauge
+	Help  string
+}
+
+func NewGauge(registry *prometheus.Registry, namespace, subsystem, name, help string) prometheus.Gauge {
+	metric := prometheus.NewGauge(prometheus.GaugeOpts{ // nolint:exhaustivestruct
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      name,
+		Help:      help,
+	})
+
+	return metric
+}
+
+type Summary struct {
+	Summary prometheus.Summary
+	Help    string
+}
+
+func NewSummary(registry *prometheus.Registry, namespace, subsystem, name, help string) prometheus.Summary {
+	metric := prometheus.NewSummary(prometheus.SummaryOpts{ // nolint:exhaustivestruct
+		Namespace:  namespace,
+		Subsystem:  subsystem,
+		Name:       name,
+		Help:       help,
+		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.95: 0.01, 0.99: 0.001, 1: 0}, // nolint:gomnd
+	})
+
+	return metric
+}
+
+type Histogram struct {
+	Histogram prometheus.Histogram
+	Help      string
+}
+
+func NewHistogram(registry *prometheus.Registry, namespace, subsystem, name, help string) prometheus.Histogram {
+	metric := prometheus.NewHistogram(prometheus.HistogramOpts{ // nolint:exhaustivestruct
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      name,
+		Help:      help,
+		Buckets:   []float64{0},
+	})
+
+	return metric
+}
+
+func NewPrometheusAdapter(registry *prometheus.Registry, logger logrus.FieldLogger, ns, sub string) *PrometheusAdapter {
+	builtinMetrics := builtinMetrics{
+		VUS:                          NewGauge(registry, ns, sub, "vus", "Current number of active virtual users"),
+		VUSMax:                       NewGauge(registry, ns, sub, "vus_max", "Max possible number of virtual users"),
+		HTTPReqBlockedCurrent:        NewGauge(registry, ns, sub, "http_req_blocked_current", "Time spent blocked  before initiating the request"),
+		HTTPReqConnectingCurrent:     NewGauge(registry, ns, sub, "http_req_connecting_current", "Time spent establishing TCP connection"),
+		HTTPReqDurationCurrent:       NewGauge(registry, ns, sub, "http_req_duration_current", "Total time for the request"),
+		HTTPReqReceivingCurrent:      NewGauge(registry, ns, sub, "http_req_receiving_current", "Time spent receiving response data"),
+		HTTPReqSendingCurrent:        NewGauge(registry, ns, sub, "http_req_sending_current", "Time spent sending data"),
+		HTTPReqTLSHandshakingCurrent: NewGauge(registry, ns, sub, "http_req_tls_handshaking_current", "Time spent handshaking TLS session"),
+		HTTPReqWaitingCurrent:        NewGauge(registry, ns, sub, "http_req_waiting_current", "Time spent waiting for response"),
+		IterationDurationCurrent:     NewGauge(registry, ns, sub, "iteration_duration_current", "The time it took to complete one full iteration"),
+		DataReceived:                 NewCounter(registry, ns, sub, "data_received", "The amount of received data"),
+		DataSent:                     NewCounter(registry, ns, sub, "data_sent", "The amount of data sent"),
+		HTTPReqs:                     NewCounter(registry, ns, sub, "http_reqs", "How many HTTP requests has k6 generated, in total"),
+		Iterations:                   NewCounter(registry, ns, sub, "iterations", "The aggregate number of times the VUs in the test have executed"),
+		DroppedIterations:            NewCounter(registry, ns, sub, "dropped_iterations", "The number of iterations that could not be started"),
+		HTTPReqBlocked:               NewSummary(registry, ns, sub, "http_req_blocked", "Time spent blocked  before initiating the request"),
+		HTTPReqConnecting:            NewSummary(registry, ns, sub, "http_req_connecting", "Time spent establishing TCP connection"),
+		HTTPReqReceiving:             NewSummary(registry, ns, sub, "http_req_receiving", "Time spent receiving response data"),
+		HTTPReqSending:               NewSummary(registry, ns, sub, "http_req_sending", "Time spent sending data"),
+		HTTPReqTLSHandshaking:        NewSummary(registry, ns, sub, "http_req_tls_handshaking", "Time spent handshaking TLS session"),
+		HTTPReqWaiting:               NewSummary(registry, ns, sub, "http_req_waiting", "Time spent waiting for response"),
+		HTTPReqDuration:              NewSummary(registry, ns, sub, "http_req_duration", "Total time for the request"),
+		IterationDuration:            NewSummary(registry, ns, sub, "iteration_duration", "The time it took to complete one full iteration"),
+		Checks:                       NewHistogram(registry, ns, sub, "checks", "The rate of successful checks"),
+		HTTPReqFailed:                NewHistogram(registry, ns, sub, "http_req_failed", "The rate of failed requests"),
+	}
+
+	// register builtin metrics
+	metrics := []prometheus.Collector{
+		builtinMetrics.VUS,
+		builtinMetrics.VUSMax,
+		builtinMetrics.HTTPReqBlockedCurrent,
+		builtinMetrics.HTTPReqConnectingCurrent,
+		builtinMetrics.HTTPReqDurationCurrent,
+		builtinMetrics.HTTPReqReceivingCurrent,
+		builtinMetrics.HTTPReqSendingCurrent,
+		builtinMetrics.HTTPReqTLSHandshakingCurrent,
+		builtinMetrics.HTTPReqWaitingCurrent,
+		builtinMetrics.IterationDurationCurrent,
+		builtinMetrics.DataReceived,
+		builtinMetrics.DataSent,
+		builtinMetrics.HTTPReqs,
+		builtinMetrics.Iterations,
+		builtinMetrics.DroppedIterations,
+		builtinMetrics.HTTPReqBlocked,
+		builtinMetrics.HTTPReqConnecting,
+		builtinMetrics.HTTPReqReceiving,
+		builtinMetrics.HTTPReqSending,
+		builtinMetrics.HTTPReqTLSHandshaking,
+		builtinMetrics.HTTPReqWaiting,
+		builtinMetrics.HTTPReqDuration,
+		builtinMetrics.Checks,
+		builtinMetrics.HTTPReqFailed,
+	}
+
+	for _, collector := range metrics {
+		if err := registry.Register(collector); err != nil {
+			return nil
+		}
+	}
+
+	return &PrometheusAdapter{
+		Subsystem:      sub,
+		Namespace:      ns,
+		logger:         logger,
+		registry:       registry,
+		builtinMetrics: builtinMetrics,
+	}
+}
+
+func (a *PrometheusAdapter) Handler() http.Handler {
+	return promhttp.HandlerFor(a.registry, promhttp.HandlerOpts{}) // nolint:exhaustivestruct
+}
+
+func (a *PrometheusAdapter) HandleSample(sample *metrics.Sample) {
+	var handler func(*metrics.Sample)
+
+	switch sample.Metric.Type {
+	case metrics.Counter:
+		handler = a.handleCounter
+	case metrics.Gauge:
+		handler = a.handleGauge
+	case metrics.Rate:
+		handler = a.handleRate
+	case metrics.Trend:
+		handler = a.handleTrend
+	default:
+		a.logger.Warnf("Unknown metric type: %v", sample.Metric.Type)
+
+		return
+	}
+
+	handler(sample)
+}
+
+func (a *PrometheusAdapter) handleCounter(sample *metrics.Sample) {
+	switch sample.Metric.Name {
+	case "data_received":
+		a.builtinMetrics.DataReceived.Add(sample.Value)
+	case "data_sent":
+		a.builtinMetrics.DataSent.Add(sample.Value)
+	case "http_reqs":
+		a.builtinMetrics.HTTPReqs.Add(sample.Value)
+	case "iterations":
+		a.builtinMetrics.Iterations.Add(sample.Value)
+	default:
+		return
+	}
+}
+
+func (a *PrometheusAdapter) handleGauge(sample *metrics.Sample) {
+	switch sample.Metric.Name {
+	case "vus":
+		a.builtinMetrics.VUS.Set(sample.Value)
+	case "vus_max":
+		a.builtinMetrics.VUSMax.Set(sample.Value)
+	case "http_req_blocked_current":
+		a.builtinMetrics.HTTPReqBlockedCurrent.Set(sample.Value)
+	case "http_req_connecting_current":
+		a.builtinMetrics.HTTPReqConnectingCurrent.Set(sample.Value)
+	case "http_req_duration_current":
+		a.builtinMetrics.HTTPReqDurationCurrent.Set(sample.Value)
+	case "http_req_receiving_current":
+		a.builtinMetrics.HTTPReqReceivingCurrent.Set(sample.Value)
+	case "http_req_sending_current":
+		a.builtinMetrics.HTTPReqSendingCurrent.Set(sample.Value)
+	case "http_req_tls_handshaking_current":
+		a.builtinMetrics.HTTPReqTLSHandshakingCurrent.Set(sample.Value)
+	case "http_req_waiting_current":
+		a.builtinMetrics.HTTPReqWaitingCurrent.Set(sample.Value)
+	case "iteration_duration_current":
+		a.builtinMetrics.IterationDurationCurrent.Set(sample.Value)
+	default:
+		return
+	}
+}
+
+func (a *PrometheusAdapter) handleRate(sample *metrics.Sample) {
+	switch sample.Metric.Name {
+	case "checks":
+		a.builtinMetrics.Checks.Observe(sample.Value)
+	case "http_req_failed":
+		a.builtinMetrics.HTTPReqFailed.Observe(sample.Value)
+	default:
+		return
+	}
+}
+
+func (a *PrometheusAdapter) handleTrend(sample *metrics.Sample) {
+	switch sample.Metric.Name {
+	case "http_req_blocked":
+		a.builtinMetrics.HTTPReqBlockedCurrent.Set(sample.Value)
+		a.builtinMetrics.HTTPReqBlocked.Observe(sample.Value)
+	case "http_req_connecting":
+		a.builtinMetrics.HTTPReqConnectingCurrent.Set(sample.Value)
+		a.builtinMetrics.HTTPReqConnecting.Observe(sample.Value)
+	case "http_req_duration":
+		a.builtinMetrics.HTTPReqDurationCurrent.Set(sample.Value)
+		a.builtinMetrics.HTTPReqDuration.Observe(sample.Value)
+	case "http_req_receiving":
+		a.builtinMetrics.HTTPReqReceivingCurrent.Set(sample.Value)
+		a.builtinMetrics.HTTPReqReceiving.Observe(sample.Value)
+	case "http_req_sending":
+		a.builtinMetrics.HTTPReqSendingCurrent.Set(sample.Value)
+		a.builtinMetrics.HTTPReqSending.Observe(sample.Value)
+	case "http_req_tls_handshaking":
+		a.builtinMetrics.HTTPReqTLSHandshakingCurrent.Set(sample.Value)
+		a.builtinMetrics.HTTPReqTLSHandshaking.Observe(sample.Value)
+	case "http_req_waiting":
+		a.builtinMetrics.HTTPReqWaitingCurrent.Set(sample.Value)
+		a.builtinMetrics.HTTPReqWaiting.Observe(sample.Value)
+	case "iteration_duration":
+		a.builtinMetrics.IterationDurationCurrent.Set(sample.Value)
+		a.builtinMetrics.IterationDuration.Observe(sample.Value)
+	default:
+		return
+	}
 }

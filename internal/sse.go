@@ -28,7 +28,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/alexandrevicenzi/go-sse"
+	// "github.com/alexandrevicenzi/go-sse"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/sirupsen/logrus"
@@ -40,7 +40,7 @@ type metric struct {
 }
 
 type EventExporter struct {
-	sse      *sse.Server
+	// sse      *sse.Server
 	logger   logrus.FieldLogger
 	registry *prometheus.Registry
 	metrics  map[string]*metric
@@ -53,22 +53,22 @@ func NewEvenExporter(registry *prometheus.Registry, channel string, logger logru
 		channel:  channel,
 		logger:   logger,
 		metrics:  make(map[string]*metric),
-		sse: sse.NewServer(&sse.Options{
-			Headers: map[string]string{
-				"Access-Control-Allow-Origin": "*",
-			},
-			RetryInterval:   0,
-			ChannelNameFunc: nil,
-			Logger:          nil,
-		}),
+		// sse: sse.NewServer(&sse.Options{
+		// 	Headers: map[string]string{
+		// 		"Access-Control-Allow-Origin": "*",
+		// 	},
+		// 	RetryInterval:   0,
+		// 	ChannelNameFunc: nil,
+		// 	Logger:          nil,
+		// }),
 	}
 
 	return e
 }
 
-func (e *EventExporter) Handler() http.Handler {
-	return e.sse
-}
+// func (e *EventExporter) Handler() http.Handler {
+// 	return e.sse
+// }
 
 func (e *EventExporter) MetricsHandlerFunc() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -99,16 +99,16 @@ func (e *EventExporter) Flush() {
 		e.addSample(data, m)
 	}
 
-	b, err := json.Marshal(data)
-	if err != nil {
-		e.logger.Error(err)
+	// b, err := json.Marshal(data)
+	// if err != nil {
+	// 	e.logger.Error(err)
 
-		return
-	}
+	// 	return
+	// }
 
-	if e.sse.HasChannel(e.channel) {
-		e.sse.SendMessage(e.channel, sse.SimpleMessage(string(b)))
-	}
+	// if e.sse.HasChannel(e.channel) {
+	// 	e.sse.SendMessage(e.channel, sse.SimpleMessage(string(b)))
+	// }
 }
 
 func (e *EventExporter) addSample(data map[string]float64, mf *dto.MetricFamily) {

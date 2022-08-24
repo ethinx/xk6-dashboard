@@ -29,13 +29,16 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	_ "net/http/pprof"
 	"net/url"
+	"sync"
 	"time"
 
+	"github.com/ethinx/xk6-dashboard/internal"
 	"github.com/gorilla/schema"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
-	"github.com/szkiba/xk6-dashboard/internal"
+	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/output"
 )
 
@@ -45,12 +48,9 @@ func init() {
 }
 
 const (
-	pathEvents     = "/events/sample"
-	pathMetrics    = "/api/metrics"
-	pathPrometheus = "/api/prometheus"
-	defaultPort    = 5665
-	defaultPeriod  = 10
-	defaultUI      = "https://xk6-dashboard.netlify.app/"
+	pathMetrics   = "/api/metrics"
+	defaultPort   = 5665
+	defaultPeriod = 10
 )
 
 type options struct {
@@ -61,24 +61,27 @@ type options struct {
 }
 
 type Output struct {
-	*internal.PrometheusAdapter
-	*internal.EventExporter
+	output.SampleBuffer
 
-	flusher *output.PeriodicFlusher
-	addr    string
-	arg     string
-	logger  logrus.FieldLogger
+	*internal.PrometheusAdapter
+
+	flusher       *output.PeriodicFlusher
+	addr          string
+	arg           string
+	logger        logrus.FieldLogger
+	sampleChannel chan []metrics.SampleContainer
+	wg            sync.WaitGroup
 }
 
 func New(params output.Params) (output.Output, error) {
 	registry := prometheus.NewRegistry()
 	o := &Output{
 		PrometheusAdapter: internal.NewPrometheusAdapter(registry, params.Logger, "", ""),
-		EventExporter:     internal.NewEvenExporter(registry, pathEvents, params.Logger),
 		arg:               params.ConfigArgument,
 		logger:            params.Logger,
 		flusher:           nil,
 		addr:              "",
+		sampleChannel:     make(chan []metrics.SampleContainer, 10),
 	}
 
 	return o, nil
@@ -93,7 +96,6 @@ func getopts(qs string) (*options, error) {
 		Port:   defaultPort,
 		Host:   "",
 		Period: defaultPeriod,
-		UI:     defaultUI,
 	}
 
 	if qs == "" {
@@ -120,10 +122,8 @@ func (o *Output) handler(opts *options) (http.Handler, error) {
 		return nil, err
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle(pathEvents, o.EventExporter.Handler())
-	mux.HandleFunc(pathMetrics, o.EventExporter.MetricsHandlerFunc())
-	mux.Handle(pathPrometheus, o.PrometheusAdapter.Handler())
+	mux := http.DefaultServeMux
+	mux.Handle(pathMetrics, o.PrometheusAdapter.Handler())
 
 	u, err := url.Parse(opts.UI)
 	if err != nil {
@@ -180,7 +180,7 @@ func (o *Output) Start() error {
 		}
 	}()
 
-	o.flusher, err = output.NewPeriodicFlusher(time.Duration(opts.Period)*time.Second, o.EventExporter.Flush)
+	o.flusher, err = output.NewPeriodicFlusher(time.Duration(opts.Period)*time.Second, o.flushMetrics)
 	if err != nil {
 		return err
 	}
@@ -188,8 +188,57 @@ func (o *Output) Start() error {
 	return nil
 }
 
+func (o *Output) flushMetrics() {
+	bufferSamples := o.GetBufferedSamples()
+	lower := 0
+	upper := 0
+	batchSize := 10000
+	bufferSize := len(bufferSamples)
+
+	if batchSize > bufferSize {
+		upper = bufferSize
+	} else {
+		upper = batchSize
+	}
+
+	for lower <= bufferSize-1 {
+		samplesGroup := bufferSamples[lower:upper]
+		o.sampleChannel <- samplesGroup
+
+		lower = upper
+		upper += batchSize
+
+		if upper >= bufferSize {
+			upper = bufferSize
+		}
+
+		go func(*Output) {
+			defer o.wg.Done()
+			o.wg.Add(1)
+
+			sampleGroup := <-o.sampleChannel
+
+			for _, sc := range sampleGroup {
+				samples := sc.GetSamples()
+
+				for _, entry := range samples {
+					o.HandleSample(&entry)
+				}
+
+			}
+
+		}(o)
+	}
+}
+
 func (o *Output) Stop() error {
+	defer close(o.sampleChannel)
+
 	o.flusher.Stop()
+	o.wg.Wait()
+
+	o.logger.Info("All set and wait 30s")
+	time.Sleep(30 * time.Second)
 
 	return nil
 }
