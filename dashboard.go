@@ -32,6 +32,7 @@ import (
 	_ "net/http/pprof"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethinx/xk6-dashboard/internal"
@@ -58,6 +59,7 @@ type options struct {
 	Host   string
 	Period int
 	UI     string
+	Wait   int
 }
 
 type Output struct {
@@ -65,12 +67,13 @@ type Output struct {
 
 	*internal.PrometheusAdapter
 
-	flusher       *output.PeriodicFlusher
-	addr          string
-	arg           string
-	logger        logrus.FieldLogger
-	sampleChannel chan []metrics.SampleContainer
-	wg            sync.WaitGroup
+	flusher        *output.PeriodicFlusher
+	addr           string
+	arg            string
+	logger         logrus.FieldLogger
+	sampleChannel  chan []metrics.SampleContainer
+	wg             sync.WaitGroup
+	workGroupCount int64
 }
 
 func New(params output.Params) (output.Output, error) {
@@ -82,6 +85,7 @@ func New(params output.Params) (output.Output, error) {
 		flusher:           nil,
 		addr:              "",
 		sampleChannel:     make(chan []metrics.SampleContainer, 10),
+		workGroupCount:    0,
 	}
 
 	return o, nil
@@ -214,7 +218,11 @@ func (o *Output) flushMetrics() {
 
 		go func(*Output) {
 			defer o.wg.Done()
+			defer func() {
+				atomic.AddInt64(&o.workGroupCount, -1)
+			}()
 			o.wg.Add(1)
+			atomic.AddInt64(&o.workGroupCount, 1)
 
 			sampleGroup := <-o.sampleChannel
 
@@ -229,6 +237,7 @@ func (o *Output) flushMetrics() {
 
 		}(o)
 	}
+	o.logger.WithField("Count", o.workGroupCount).Info("Work Group")
 }
 
 func (o *Output) Stop() error {
@@ -237,8 +246,15 @@ func (o *Output) Stop() error {
 	o.flusher.Stop()
 	o.wg.Wait()
 
-	o.logger.Info("All set and wait 30s")
-	time.Sleep(30 * time.Second)
+	opts, err := getopts(o.arg)
+	if err != nil {
+		return err
+	}
+
+	if opts.Wait > 0 {
+		o.logger.Infof("All set and wait %ns", opts.Wait)
+		time.Sleep(time.Duration(opts.Wait) * time.Second)
+	}
 
 	return nil
 }
