@@ -23,6 +23,7 @@
 package internal
 
 import (
+	// "fmt"
 	"net/http"
 	"sync"
 
@@ -81,14 +82,14 @@ type builtinMetrics struct {
 	HTTPReqs                     prometheus.Counter
 	Iterations                   prometheus.Counter
 	DroppedIterations            prometheus.Counter
-	HTTPReqBlocked               prometheus.Summary
-	HTTPReqConnecting            prometheus.Summary
-	HTTPReqDuration              prometheus.Summary
-	HTTPReqReceiving             prometheus.Summary
-	HTTPReqSending               prometheus.Summary
-	HTTPReqTLSHandshaking        prometheus.Summary
-	HTTPReqWaiting               prometheus.Summary
-	IterationDuration            prometheus.Summary
+	HTTPReqBlocked               prometheus.Histogram
+	HTTPReqConnecting            prometheus.Histogram
+	HTTPReqDuration              prometheus.Histogram
+	HTTPReqReceiving             prometheus.Histogram
+	HTTPReqSending               prometheus.Histogram
+	HTTPReqTLSHandshaking        prometheus.Histogram
+	HTTPReqWaiting               prometheus.Histogram
+	IterationDuration            prometheus.Histogram
 	Checks                       prometheus.Histogram
 	HTTPReqFailed                prometheus.Histogram
 }
@@ -147,13 +148,16 @@ type Histogram struct {
 	Help      string
 }
 
-func NewHistogram(registry *prometheus.Registry, namespace, subsystem, name, help string) prometheus.Histogram {
+func NewHistogram(registry *prometheus.Registry, namespace, subsystem, name, help string, buckets []float64) prometheus.Histogram {
+	if len(buckets) == 0 {
+		buckets = prometheus.ExponentialBuckets(0.001, 2, 32)
+	}
 	metric := prometheus.NewHistogram(prometheus.HistogramOpts{ // nolint:exhaustivestruct
 		Namespace: namespace,
 		Subsystem: subsystem,
 		Name:      name,
 		Help:      help,
-		Buckets:   []float64{0},
+		Buckets:   buckets,
 	})
 
 	return metric
@@ -176,16 +180,16 @@ func NewPrometheusAdapter(registry *prometheus.Registry, logger logrus.FieldLogg
 		HTTPReqs:                     NewCounter(registry, ns, sub, "http_reqs", "How many HTTP requests has k6 generated, in total"),
 		Iterations:                   NewCounter(registry, ns, sub, "iterations", "The aggregate number of times the VUs in the test have executed"),
 		DroppedIterations:            NewCounter(registry, ns, sub, "dropped_iterations", "The number of iterations that could not be started"),
-		HTTPReqBlocked:               NewSummary(registry, ns, sub, "http_req_blocked", "Time spent blocked  before initiating the request"),
-		HTTPReqConnecting:            NewSummary(registry, ns, sub, "http_req_connecting", "Time spent establishing TCP connection"),
-		HTTPReqReceiving:             NewSummary(registry, ns, sub, "http_req_receiving", "Time spent receiving response data"),
-		HTTPReqSending:               NewSummary(registry, ns, sub, "http_req_sending", "Time spent sending data"),
-		HTTPReqTLSHandshaking:        NewSummary(registry, ns, sub, "http_req_tls_handshaking", "Time spent handshaking TLS session"),
-		HTTPReqWaiting:               NewSummary(registry, ns, sub, "http_req_waiting", "Time spent waiting for response"),
-		HTTPReqDuration:              NewSummary(registry, ns, sub, "http_req_duration", "Total time for the request"),
-		IterationDuration:            NewSummary(registry, ns, sub, "iteration_duration", "The time it took to complete one full iteration"),
-		Checks:                       NewHistogram(registry, ns, sub, "checks", "The rate of successful checks"),
-		HTTPReqFailed:                NewHistogram(registry, ns, sub, "http_req_failed", "The rate of failed requests"),
+		HTTPReqBlocked:               NewHistogram(registry, ns, sub, "http_req_blocked", "time spent blocked  before initiating the request", []float64{}),
+		HTTPReqConnecting:            NewHistogram(registry, ns, sub, "http_req_connecting", "time spent establishing tcp connection", []float64{}),
+		HTTPReqReceiving:             NewHistogram(registry, ns, sub, "http_req_receiving", "time spent receiving response data", []float64{}),
+		HTTPReqSending:               NewHistogram(registry, ns, sub, "http_req_sending", "time spent sending data", []float64{}),
+		HTTPReqTLSHandshaking:        NewHistogram(registry, ns, sub, "http_req_tls_handshaking", "time spent handshaking tls session", []float64{}),
+		HTTPReqWaiting:               NewHistogram(registry, ns, sub, "http_req_waiting", "time spent waiting for response", []float64{}),
+		HTTPReqDuration:              NewHistogram(registry, ns, sub, "http_req_duration", "total time for the request", []float64{}),
+		IterationDuration:            NewHistogram(registry, ns, sub, "iteration_duration", "the time it took to complete one full iteration", []float64{}),
+		Checks:                       NewHistogram(registry, ns, sub, "checks", "The rate of successful checks", []float64{}),
+		HTTPReqFailed:                NewHistogram(registry, ns, sub, "http_req_failed", "The rate of failed requests", []float64{}),
 	}
 
 	// register builtin metrics

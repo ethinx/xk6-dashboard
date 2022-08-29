@@ -184,12 +184,40 @@ func (o *Output) Start() error {
 		}
 	}()
 
+	go o.MetricWorker()
+
 	o.flusher, err = output.NewPeriodicFlusher(time.Duration(opts.Period)*time.Second, o.flushMetrics)
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func (o *Output) MetricWorker() {
+	for {
+		select {
+		case sampleGroup := <-o.sampleChannel:
+			go func(*Output) {
+				defer o.wg.Done()
+				defer func() {
+					atomic.AddInt64(&o.workGroupCount, -1)
+				}()
+				o.wg.Add(1)
+				atomic.AddInt64(&o.workGroupCount, 1)
+
+				for _, sc := range sampleGroup {
+					samples := sc.GetSamples()
+
+					for _, entry := range samples {
+						o.HandleSample(&entry)
+					}
+
+				}
+
+			}(o)
+		}
+	}
 }
 
 func (o *Output) flushMetrics() {
@@ -216,26 +244,6 @@ func (o *Output) flushMetrics() {
 			upper = bufferSize
 		}
 
-		go func(*Output) {
-			defer o.wg.Done()
-			defer func() {
-				atomic.AddInt64(&o.workGroupCount, -1)
-			}()
-			o.wg.Add(1)
-			atomic.AddInt64(&o.workGroupCount, 1)
-
-			sampleGroup := <-o.sampleChannel
-
-			for _, sc := range sampleGroup {
-				samples := sc.GetSamples()
-
-				for _, entry := range samples {
-					o.HandleSample(&entry)
-				}
-
-			}
-
-		}(o)
 	}
 	o.logger.WithField("Count", o.workGroupCount).Info("Work Group")
 }
@@ -252,7 +260,7 @@ func (o *Output) Stop() error {
 	}
 
 	if opts.Wait > 0 {
-		o.logger.Infof("All set and wait %ns", opts.Wait)
+		o.logger.Infof("All set and wait %ds", opts.Wait)
 		time.Sleep(time.Duration(opts.Wait) * time.Second)
 	}
 
