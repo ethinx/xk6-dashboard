@@ -49,7 +49,7 @@ func init() {
 }
 
 const (
-	pathMetrics   = "/api/metrics"
+	pathMetrics   = "/metrics"
 	defaultPort   = 5665
 	defaultPeriod = 10
 )

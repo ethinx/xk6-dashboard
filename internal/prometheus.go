@@ -150,7 +150,7 @@ type Histogram struct {
 
 func NewHistogram(registry *prometheus.Registry, namespace, subsystem, name, help string, buckets []float64) prometheus.Histogram {
 	if len(buckets) == 0 {
-		buckets = prometheus.ExponentialBuckets(0.001, 2, 32)
+		buckets = append([]float64{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9}, prometheus.ExponentialBuckets(1, 2, 16)...)
 	}
 	metric := prometheus.NewHistogram(prometheus.HistogramOpts{ // nolint:exhaustivestruct
 		Namespace: namespace,
